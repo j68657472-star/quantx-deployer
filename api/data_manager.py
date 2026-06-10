@@ -143,19 +143,9 @@ def fetch_from_ibkr(symbol, timeframe, limit, host="127.0.0.1", port=7497, clien
 # ── Yahoo Finance ─────────────────────────────────────────────────────────────
 
 def fetch_from_yahoo(symbol, timeframe, limit):
+    import requests
+    from datetime import datetime, timezone
     try:
-        import yfinance as yf
-    except ImportError:
-        log.warning("yfinance not installed. Run: pip install yfinance")
-        return None
-    try:
-        session = None
-        try:
-            from curl_cffi import requests as curl_requests
-            session = curl_requests.Session(impersonate="chrome")
-        except ImportError:
-            log.warning("curl-cffi not installed — trying default yfinance requests session")
-
         yf_sym = symbol
         if symbol.endswith(".HK"):
             code = symbol.replace(".HK", "").zfill(4)
@@ -168,25 +158,80 @@ def fetch_from_yahoo(symbol, timeframe, limit):
         interval = interval_map.get(timeframe, "1d")
 
         if timeframe in ("1min", "5min", "15min", "30min"):
-            period = "60d"
+            range_val = "5d"
         elif timeframe in ("1hour", "4hour"):
-            period = "730d"
+            range_val = "730d"
         else:
-            period = f"{max(1, min(25, limit // 252 + 1))}y"
+            years = max(1, min(25, limit // 252 + 1))
+            range_val = f"{years}y"
 
-        ticker = yf.Ticker(yf_sym, session=session) if session else yf.Ticker(yf_sym)
-        df = ticker.history(period=period, interval=interval, auto_adjust=True, actions=False)
-        if df is None or len(df) == 0:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_sym}?range={range_val}&interval={interval}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Connection': 'keep-alive'
+        }
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            log.warning("Yahoo API returned status %d for %s", r.status_code, yf_sym)
             return None
-
-        bars = [{"date": str(idx)[:10], "open": round(float(row["Open"]), 4),
-                 "high": round(float(row["High"]), 4), "low": round(float(row["Low"]), 4),
-                 "close": round(float(row["Close"]), 4),
-                 "volume": float(row.get("Volume", 0))}
-                for idx, row in df.iterrows() if float(row["Close"]) > 0]
+        
+        data = r.json()
+        if not data.get("chart") or not data["chart"].get("result"):
+            return None
+            
+        result = data["chart"]["result"][0]
+        timestamps = result.get("timestamp", [])
+        if not timestamps:
+            return None
+            
+        indicators = result.get("indicators", {})
+        quote = indicators.get("quote", [{}])[0]
+        adjclose_list = indicators.get("adjclose", [{}])[0].get("adjclose", [])
+        
+        bars = []
+        for i in range(len(timestamps)):
+            try:
+                ts = timestamps[i]
+                dt = datetime.fromtimestamp(ts, timezone.utc)
+                date_str = dt.strftime('%Y-%m-%d %H:%M:%S' if interval != '1d' and interval != '1wk' else '%Y-%m-%d')
+                
+                o = quote.get("open", [])[i]
+                h = quote.get("high", [])[i]
+                l = quote.get("low", [])[i]
+                c = quote.get("close", [])[i]
+                v = quote.get("volume", [])[i]
+                
+                if o is None or h is None or l is None or c is None:
+                    continue
+                
+                if adjclose_list and i < len(adjclose_list) and adjclose_list[i] is not None and c > 0:
+                    factor = adjclose_list[i] / c
+                    o = round(float(o * factor), 4)
+                    h = round(float(h * factor), 4)
+                    l = round(float(l * factor), 4)
+                    c = round(float(adjclose_list[i]), 4)
+                else:
+                    o = round(float(o), 4)
+                    h = round(float(h), 4)
+                    l = round(float(l), 4)
+                    c = round(float(c), 4)
+                
+                bars.append({
+                    "date": date_str,
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": c,
+                    "volume": float(v) if v is not None else 0.0
+                })
+            except Exception:
+                continue
+                
         if len(bars) > limit:
             bars = bars[-limit:]
-        log.info("Yahoo: %d bars for %s/%s (yf: %s)", len(bars), symbol, timeframe, yf_sym)
+            
+        log.info("Yahoo Chart API: %d bars for %s/%s (yf: %s)", len(bars), symbol, timeframe, yf_sym)
         return bars
     except Exception as e:
         log.warning("Yahoo fetch failed %s/%s: %s", symbol, timeframe, e)
@@ -302,7 +347,7 @@ def _lp_candles_to_bars(candles, limit: int) -> list:
                 "high":   float(c.high),
                 "low":    float(c.low),
                 "close":  float(c.close),
-                "volume": float(c.volume) if c.volume is not None else 0.0,
+                "volume": float(c.volume) if c.volume is not None else 0.0
             })
         except Exception:
             continue
