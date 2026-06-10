@@ -149,6 +149,13 @@ def fetch_from_yahoo(symbol, timeframe, limit):
         log.warning("yfinance not installed. Run: pip install yfinance")
         return None
     try:
+        session = None
+        try:
+            from curl_cffi import requests as curl_requests
+            session = curl_requests.Session(impersonate="chrome")
+        except ImportError:
+            log.warning("curl-cffi not installed — trying default yfinance requests session")
+
         yf_sym = symbol
         if symbol.endswith(".HK"):
             code = symbol.replace(".HK", "").zfill(4)
@@ -167,7 +174,8 @@ def fetch_from_yahoo(symbol, timeframe, limit):
         else:
             period = f"{max(1, min(25, limit // 252 + 1))}y"
 
-        df = yf.Ticker(yf_sym).history(period=period, interval=interval, auto_adjust=True, actions=False)
+        ticker = yf.Ticker(yf_sym, session=session) if session else yf.Ticker(yf_sym)
+        df = ticker.history(period=period, interval=interval, auto_adjust=True, actions=False)
         if df is None or len(df) == 0:
             return None
 
@@ -201,11 +209,9 @@ def fetch_from_longport(symbol: str, timeframe: str, limit: int,
                         _get_ctx_fn=None):
     """
     Fetch OHLCV bars from LongPort.
-
     _get_ctx_fn: optional callable(app_key, secret, token) -> pooled QuoteContext.
     When provided, reuses an existing connected context (no handshake overhead).
     When None, creates a fresh context and deletes it in finally.
-
     Strategy:
     - limit <= 1000: single candlesticks() call (~2s)
     - limit > 1000:  paginated history_candlesticks_by_offset
@@ -310,7 +316,6 @@ def fetch_bars_waterfall_sync(symbol, timeframe, limit, db_path,
                                skip_cache=False, _get_lp_ctx_fn=None):
     """Synchronous waterfall fetch — call from executor thread.
     Priority: Local SQLite → R2 → LongPort → Yahoo → FMP
-
     _get_lp_ctx_fn: optional callable(app_key, secret, token) -> pooled QuoteContext.
     When provided, LongPort fetches reuse an existing connection (no handshake).
     """
