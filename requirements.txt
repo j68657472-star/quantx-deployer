@@ -21,3 +21,4 @@ bcrypt==4.1.2
 pyjwt==2.8.0
 psycopg2-binary==2.9.9
 modal
+curl-cffi
